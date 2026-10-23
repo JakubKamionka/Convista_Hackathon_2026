@@ -40,6 +40,11 @@ export function createSapAgent(config: SapConfig): Agent {
   return new Agent({ rejectUnauthorized, ca });
 }
 
+// Non-ADT endpoints are allowed by exact path only, never by prefix.
+const ALLOWED_NON_ADT_PATHS = new Set([
+  "/sap/opu/odata/sap/API_BUSINESS_PARTNER/A_BusinessPartner",
+]);
+
 export function assertSapTarget(url: string, config: SapConfig): void {
   let target: URL;
   try {
@@ -52,7 +57,10 @@ export function assertSapTarget(url: string, config: SapConfig): void {
     target.username ||
     target.password ||
     target.hash ||
-    !target.pathname.startsWith("/sap/bc/adt/")
+    !(
+      target.pathname.startsWith("/sap/bc/adt/") ||
+      ALLOWED_NON_ADT_PATHS.has(target.pathname)
+    )
   ) {
     throw new Error(
       "SAP request target must stay within the configured ADT origin",

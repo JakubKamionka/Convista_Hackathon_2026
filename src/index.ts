@@ -25,6 +25,10 @@ import { handleSearchObject } from "./handlers/handleSearchObject";
 import { handleGetCDSView } from "./handlers/handleGetCDSView";
 import { handleGetBehaviorDefinition } from "./handlers/handleGetBehaviorDefinition";
 import { handleGetServiceDefinition } from "./handlers/handleGetServiceDefinition";
+import {
+  handleCreateBusinessPartner,
+  writesEnabled,
+} from "./handlers/handleCreateBusinessPartner";
 
 // Import shared utility functions and types
 import { MAX_PAGE_LINES, cleanup } from "./lib/utils";
@@ -376,7 +380,47 @@ const TOOL_DEFINITIONS = [
   },
 ];
 
+// Write tools are registered only when SAP_ALLOW_WRITES=1, so the default
+// server stays read-only.
+const WRITE_TOOL_DEFINITIONS = [
+  {
+    name: "CreateBusinessPartner",
+    write: true,
+    description:
+      "Create a new business partner (person or organization) in SAP through the API_BUSINESS_PARTNER OData service. Requires SAP_ALLOW_WRITES=1 and an activated service. Returns the created entity, including the assigned BusinessPartner number.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        business_partner_category: {
+          type: "string",
+          enum: ["1", "2"],
+          description: '"1" = person, "2" = organization',
+        },
+        business_partner_grouping: {
+          type: "string",
+          description:
+            "Business partner grouping (system-specific, see table TB001; e.g. 0001), determines number range and required fields",
+        },
+        first_name: {
+          type: "string",
+          description: "First name (persons only, optional)",
+        },
+        last_name: {
+          type: "string",
+          description: "Last name (required for persons)",
+        },
+        organization_name: {
+          type: "string",
+          description: "Organization name (required for organizations)",
+        },
+      },
+      required: ["business_partner_category", "business_partner_grouping"],
+    },
+  },
+];
+
 const HANDLERS: Record<string, (args: any) => Promise<any>> = {
+  CreateBusinessPartner: handleCreateBusinessPartner,
   GetProgram: handleGetProgram,
   GetClass: handleGetClass,
   GetFunction: handleGetFunction,
@@ -400,7 +444,11 @@ export function createServer(): McpServer {
     name: "mcp-abap-adt",
     version: require("../package.json").version,
   });
-  for (const tool of addPagingSchemas(TOOL_DEFINITIONS)) {
+  const tools = [
+    ...addPagingSchemas(TOOL_DEFINITIONS),
+    ...(writesEnabled() ? WRITE_TOOL_DEFINITIONS : []),
+  ];
+  for (const tool of tools) {
     const properties = tool.inputSchema.properties;
     for (const value of Object.values(properties) as any[]) {
       if (value.type === "string") {
@@ -425,9 +473,9 @@ export function createServer(): McpServer {
           additionalProperties: false,
         }),
         annotations: {
-          readOnlyHint: true,
+          readOnlyHint: !("write" in tool),
           destructiveHint: false,
-          idempotentHint: true,
+          idempotentHint: !("write" in tool),
           openWorldHint: true,
         },
       },
