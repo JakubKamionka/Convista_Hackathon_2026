@@ -34,6 +34,14 @@ import {
   CREATE_OBJECT_TYPES,
 } from "./handlers/handleCreateObject";
 import {
+  handleUpdateObject,
+  UPDATE_OBJECT_TYPES,
+} from "./handlers/handleUpdateObject";
+import {
+  handleDeleteObject,
+  DELETE_OBJECT_TYPES,
+} from "./handlers/handleDeleteObject";
+import {
   handleInsertTableRows,
   MAX_INSERT_ROWS,
 } from "./handlers/handleInsertTableRows";
@@ -464,10 +472,73 @@ const WRITE_TOOL_DEFINITIONS = [
     },
   },
   {
+    name: "UpdateObject",
+    write: true,
+    destructive: true,
+    description:
+      "Overwrite the source of an existing ABAP repository object in a local $ package (no transport) through ADT: lock, write the full new source, unlock, then activate. Requires SAP_ALLOW_WRITES=1. Refuses objects outside local $ packages. Returns updated/activated plus activation messages; if activation fails, the new source stays saved as an inactive version and the result says so.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        object_type: {
+          type: "string",
+          enum: UPDATE_OBJECT_TYPES,
+          description:
+            "Kind of object. Only source-based objects can be updated; table and structure use DDIC source syntax (define table / define structure).",
+        },
+        name: {
+          type: "string",
+          description:
+            "Name of the existing object in customer namespace (Z* or Y*). For behavior_definition use the root CDS entity name.",
+        },
+        source: {
+          type: "string",
+          description:
+            "Complete new source code; replaces the current source entirely (must declare the same name).",
+          maxLength: 500_000,
+        },
+        function_group: {
+          type: "string",
+          description:
+            "Function group in a local $ package that contains the module (required for function_module)",
+        },
+      },
+      required: ["object_type", "name", "source"],
+    },
+  },
+  {
+    name: "DeleteObject",
+    write: true,
+    destructive: true,
+    description:
+      "Delete an ABAP repository object from a local $ package (no transport) through ADT: lock, then delete. Requires SAP_ALLOW_WRITES=1. Refuses objects outside local $ packages. Deleting a function group also deletes its function modules; a package must be empty. Cannot be undone.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        object_type: {
+          type: "string",
+          enum: DELETE_OBJECT_TYPES,
+          description: "Kind of object to delete",
+        },
+        name: {
+          type: "string",
+          description:
+            "Object name in customer namespace (Z* or Y*); for package a local name starting with $ (never $TMP itself). For behavior_definition use the root CDS entity name.",
+        },
+        function_group: {
+          type: "string",
+          description:
+            "Function group in a local $ package that contains the module (required for function_module)",
+        },
+      },
+      required: ["object_type", "name"],
+    },
+  },
+  {
     name: "InsertTableRows",
     write: true,
     description:
-      "Insert rows into a Z/Y transparent table in a local $ package. Generates a temporary $TMP class, runs it through ADT classrun (one INSERT ... ACCEPTING DUPLICATE KEYS plus COMMIT) and deletes it again. Insert only: rows whose key already exists are skipped, never updated. The client field is filled automatically; values follow ABAP conversion rules (e.g. dates as YYYYMMDD). Requires SAP_ALLOW_WRITES=1. Returns inserted and skippedDuplicates.",
+      "Insert rows into a Z/Y transparent table in a local $ package. Generates a temporary $TMP report, runs it through ADT programrun (one INSERT ... ACCEPTING DUPLICATE KEYS plus COMMIT) and deletes it again. Insert only: rows whose key already exists are skipped, never updated. The client field is filled automatically; values follow ABAP conversion rules (e.g. dates as YYYYMMDD). Requires SAP_ALLOW_WRITES=1. Returns inserted and skippedDuplicates.",
     inputSchema: {
       type: "object",
       properties: {
@@ -493,6 +564,8 @@ const WRITE_TOOL_DEFINITIONS = [
 const HANDLERS: Record<string, (args: any) => Promise<any>> = {
   CreateBusinessPartner: handleCreateBusinessPartner,
   CreateObject: handleCreateObject,
+  UpdateObject: handleUpdateObject,
+  DeleteObject: handleDeleteObject,
   InsertTableRows: handleInsertTableRows,
   GetProgram: handleGetProgram,
   GetClass: handleGetClass,
@@ -547,7 +620,7 @@ export function createServer(): McpServer {
         }),
         annotations: {
           readOnlyHint: !("write" in tool),
-          destructiveHint: false,
+          destructiveHint: "destructive" in tool,
           idempotentHint: !("write" in tool),
           openWorldHint: true,
         },
