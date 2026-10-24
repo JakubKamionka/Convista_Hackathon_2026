@@ -55,7 +55,7 @@
         },
         {
           "name": "SAP_ALLOW_WRITES",
-          "description": "Set to 1 to register write tools (CreateBusinessPartner, CreateObject, InsertTableRows). Default: read-only.",
+          "description": "Set to 1 to register write tools (CreateBusinessPartner, UpdateBusinessPartner, CreateObject, UpdateObject, DeleteObject, InsertTableRows, UpdateTableRows, DeleteTableRows). Default: read-only.",
           "isRequired": false
         }
       ]

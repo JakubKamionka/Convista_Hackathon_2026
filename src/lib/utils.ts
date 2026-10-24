@@ -504,8 +504,8 @@ export async function makeAdtRequest(
 
   assertSapTarget(url, config);
 
-  // Modifying requests (POST/PUT/DELETE) need a CSRF token
-  const needsCsrf = ["POST", "PUT", "DELETE"].includes(method);
+  // Modifying requests (POST/PUT/PATCH/DELETE) need a CSRF token
+  const needsCsrf = ["POST", "PUT", "PATCH", "DELETE"].includes(method);
   if (needsCsrf && !csrfToken) {
     try {
       csrfToken = await fetchCsrfToken(url);
@@ -516,7 +516,7 @@ export async function makeAdtRequest(
           ? error.cause.response?.status
           : undefined;
       throw new Error(
-        `CSRF token is required for POST/PUT/DELETE requests but could not be fetched${status ? ` (HTTP ${status})` : ""}`,
+        `CSRF token is required for POST/PUT/PATCH/DELETE requests but could not be fetched${status ? ` (HTTP ${status})` : ""}`,
       );
     }
   }
