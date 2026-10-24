@@ -385,6 +385,21 @@ export async function getAuthHeaders() {
   };
 }
 
+// Merge by cookie name so a stateful ADT session cookie (needed while an
+// object is locked) is kept next to the cookies from the CSRF fetch.
+function mergeCookies(setCookie: string[] | undefined) {
+  if (!setCookie?.length) return;
+  const jar = new Map<string, string>();
+  for (const pair of [
+    ...(cookies ? cookies.split("; ") : []),
+    ...setCookie.map((cookie) => cookie.split(";", 1)[0]),
+  ]) {
+    const name = pair.split("=", 1)[0];
+    if (name) jar.set(name, pair);
+  }
+  cookies = [...jar.values()].join("; ");
+}
+
 async function fetchCsrfToken(url: string): Promise<string> {
   if (!config) {
     config = getConfig();
@@ -414,11 +429,7 @@ async function fetchCsrfToken(url: string): Promise<string> {
     }
 
     // Extract and store cookies
-    if (response.headers["set-cookie"]) {
-      cookies = response.headers["set-cookie"]
-        .map((cookie: string) => cookie.split(";", 1)[0])
-        .join("; ");
-    }
+    mergeCookies(response.headers["set-cookie"]);
 
     return token;
   } catch (error) {
@@ -430,11 +441,7 @@ async function fetchCsrfToken(url: string): Promise<string> {
       const token = error.response.headers["x-csrf-token"];
       if (token) {
         // Extract and store cookies from the error response as well
-        if (error.response.headers["set-cookie"]) {
-          cookies = error.response.headers["set-cookie"]
-            .map((cookie: string) => cookie.split(";", 1)[0])
-            .join("; ");
-        }
+        mergeCookies(error.response.headers["set-cookie"]);
         return token;
       }
     }
@@ -459,13 +466,14 @@ export async function makeAdtRequest(
 
   assertSapTarget(url, config);
 
-  // For POST/PUT requests, ensure we have a CSRF token
-  if ((method === "POST" || method === "PUT") && !csrfToken) {
+  // Modifying requests (POST/PUT/DELETE) need a CSRF token
+  const needsCsrf = ["POST", "PUT", "DELETE"].includes(method);
+  if (needsCsrf && !csrfToken) {
     try {
       csrfToken = await fetchCsrfToken(url);
     } catch (error) {
       throw new Error(
-        "CSRF token is required for POST/PUT requests but could not be fetched",
+        "CSRF token is required for POST/PUT/DELETE requests but could not be fetched",
       );
     }
   }
@@ -475,8 +483,8 @@ export async function makeAdtRequest(
     ...(headers || {}),
   };
 
-  // Add CSRF token for POST/PUT requests
-  if ((method === "POST" || method === "PUT") && csrfToken) {
+  // Add CSRF token for modifying requests
+  if (needsCsrf && csrfToken) {
     requestHeaders["x-csrf-token"] = csrfToken;
   }
 
@@ -507,6 +515,7 @@ export async function makeAdtRequest(
 
   try {
     const response = await createAxiosInstance()(requestConfig);
+    mergeCookies(response.headers?.["set-cookie"]);
     return response;
   } catch (error) {
     // If we get a 403 with "CSRF token validation failed", try to fetch a new token and retry
@@ -519,7 +528,9 @@ export async function makeAdtRequest(
       csrfToken = await fetchCsrfToken(url);
       requestConfig.headers["x-csrf-token"] = csrfToken;
       if (cookies) requestConfig.headers["Cookie"] = cookies;
-      return await createAxiosInstance()(requestConfig);
+      const response = await createAxiosInstance()(requestConfig);
+      mergeCookies(response.headers?.["set-cookie"]);
+      return response;
     }
     throw error;
   }

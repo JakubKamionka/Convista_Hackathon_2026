@@ -29,6 +29,14 @@ import {
   handleCreateBusinessPartner,
   writesEnabled,
 } from "./handlers/handleCreateBusinessPartner";
+import {
+  handleCreateObject,
+  CREATE_OBJECT_TYPES,
+} from "./handlers/handleCreateObject";
+import {
+  handleInsertTableRows,
+  MAX_INSERT_ROWS,
+} from "./handlers/handleInsertTableRows";
 
 // Import shared utility functions and types
 import { MAX_PAGE_LINES, cleanup } from "./lib/utils";
@@ -417,10 +425,75 @@ const WRITE_TOOL_DEFINITIONS = [
       required: ["business_partner_category", "business_partner_grouping"],
     },
   },
+  {
+    name: "CreateObject",
+    write: true,
+    description:
+      "Create a new ABAP repository object in the local package $TMP (no transport) through ADT: create, optionally write the given source, then activate. Requires SAP_ALLOW_WRITES=1. Never overwrites: fails if the name already exists. Returns created/sourceWritten/activated plus activation messages; if a later step fails, the object still exists and the result says so.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        object_type: {
+          type: "string",
+          enum: CREATE_OBJECT_TYPES,
+          description:
+            "Kind of object. function_group and package take no source; package creates a local sub-package of $TMP. table (max. 16 chars) and structure use DDIC source syntax (define table / define structure).",
+        },
+        name: {
+          type: "string",
+          description:
+            "Object name in customer namespace (Z* or Y*); for package a local name starting with $ (e.g. $ZDEMO). For behavior_definition use the root CDS entity name.",
+        },
+        description: {
+          type: "string",
+          description: "Short description (max. 60 characters)",
+        },
+        source: {
+          type: "string",
+          description:
+            "Full source code to write before activation (must declare the same name). Omit to keep SAP's generated skeleton.",
+          maxLength: 500_000,
+        },
+        function_group: {
+          type: "string",
+          description:
+            "Existing function group in a local $ package (required for function_module)",
+        },
+      },
+      required: ["object_type", "name", "description"],
+    },
+  },
+  {
+    name: "InsertTableRows",
+    write: true,
+    description:
+      "Insert rows into a Z/Y transparent table in a local $ package. Generates a temporary $TMP class, runs it through ADT classrun (one INSERT ... ACCEPTING DUPLICATE KEYS plus COMMIT) and deletes it again. Insert only: rows whose key already exists are skipped, never updated. The client field is filled automatically; values follow ABAP conversion rules (e.g. dates as YYYYMMDD). Requires SAP_ALLOW_WRITES=1. Returns inserted and skippedDuplicates.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        table_name: {
+          type: "string",
+          description:
+            "Table name in customer namespace (Z* or Y*, max. 16 characters)",
+        },
+        rows: {
+          type: "array",
+          minItems: 1,
+          maxItems: MAX_INSERT_ROWS,
+          description:
+            'Rows as objects of field name to value (string, number or null), e.g. [{"book_id": "000001", "title": "Clean Code"}]. All key fields except the client are required.',
+          items: { type: "object" },
+        },
+      },
+      required: ["table_name", "rows"],
+    },
+  },
 ];
 
 const HANDLERS: Record<string, (args: any) => Promise<any>> = {
   CreateBusinessPartner: handleCreateBusinessPartner,
+  CreateObject: handleCreateObject,
+  InsertTableRows: handleInsertTableRows,
   GetProgram: handleGetProgram,
   GetClass: handleGetClass,
   GetFunction: handleGetFunction,
@@ -453,7 +526,7 @@ export function createServer(): McpServer {
     for (const value of Object.values(properties) as any[]) {
       if (value.type === "string") {
         value.minLength = 1;
-        value.maxLength = 1024;
+        value.maxLength ??= 1024;
       }
     }
     for (const name of ["max_rows", "maxResults"]) {
