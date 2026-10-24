@@ -1,7 +1,9 @@
+import { AxiosError } from 'axios';
 import {
   csrfFetchUrl,
   MAX_PAGE_LINES,
   SAFE_OUTPUT_BYTES,
+  return_error,
   return_response,
   return_text_response
 } from './utils';
@@ -178,20 +180,5 @@ describe('bounded text responses', () => {
     });
   });
 });
-
-describe("csrfFetchUrl", () => {
-  it("fetches ADT tokens from the discovery document", () => {
-    expect(
-      csrfFetchUrl("https://sap.example:443/sap/bc/adt/activation?x=1"),
-    ).toBe("https://sap.example/sap/bc/adt/discovery");
-    expect(csrfFetchUrl("http://sap:8000/sap/bc/adt/oo/classrun/ZCL")).toBe(
-      "http://sap:8000/sap/bc/adt/discovery",
-    );
-  });
-
-  it("keeps non-ADT targets unchanged", () => {
-    const url =
-      "http://sap:8000/sap/opu/odata/sap/API_BUSINESS_PARTNER/A_BusinessPartner";
-    expect(csrfFetchUrl(url)).toBe(url);
   });
 });

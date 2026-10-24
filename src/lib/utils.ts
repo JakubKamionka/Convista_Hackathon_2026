@@ -307,6 +307,31 @@ export function return_response(
   return return_text_response(response.data, args);
 }
 
+// Only the structured OData V2 business messages are surfaced, never raw bodies.
+function odataErrorMessages(data: unknown): string {
+  let parsed: any = data;
+  if (typeof data === "string") {
+    try {
+      parsed = JSON.parse(data);
+    } catch {
+      return "";
+    }
+  }
+  const error = parsed?.error;
+  const messages = [
+    error?.message?.value,
+    ...(Array.isArray(error?.innererror?.errordetails)
+      ? error.innererror.errordetails.map((detail: any) => detail?.message)
+      : []),
+  ].filter(
+    (message, index, all): message is string =>
+      typeof message === "string" &&
+      message.length > 0 &&
+      all.indexOf(message) === index,
+  );
+  return messages.length ? `: ${messages.slice(0, 5).join("; ")}` : "";
+}
+
 export function return_error(error: any) {
   // Upstream bodies may contain source, login pages, cookies or credentials.
   const message =
@@ -314,7 +339,7 @@ export function return_error(error: any) {
       ? error.code === "ERR_CANCELED"
         ? "SAP request cancelled"
         : error.response
-          ? `SAP request failed (HTTP ${error.response.status})`
+          ? `SAP request failed (HTTP ${error.response.status})${odataErrorMessages(error.response.data)}`
           : "SAP connection failed; verify SAP_URL, certificate trust and network access"
       : error instanceof McpError
         ? error.message
