@@ -214,18 +214,97 @@ const TOOL_DEFINITIONS = [
   {
     name: "GetTableContents",
     description:
-      "Retrieve contents of an ABAP table. max_rows limits SAP rows; startLine/maxLines page the returned textual XML when its serialized size is still large.",
+      "Retrieve contents of an ABAP table or CDS view. Filter and aggregate on the SAP side with where/columns/group_by/count/order_by instead of fetching everything and processing it afterwards (e.g. I_BusinessPartner for business partners). max_rows limits SAP rows; startLine/maxLines page the returned textual XML when its serialized size is still large.",
     inputSchema: {
       type: "object",
       properties: {
         table_name: {
           type: "string",
-          description: "Name of the ABAP table",
+          description: "Name of the ABAP table or CDS view",
         },
         max_rows: {
           type: "number",
           description: "Maximum number of rows to retrieve",
           default: 100,
+        },
+        columns: {
+          type: "array",
+          description:
+            "Fields to return (default: all). Selecting only needed fields keeps responses small.",
+          items: { type: "string", minLength: 1, maxLength: 30 },
+          minItems: 1,
+          maxItems: 100,
+        },
+        where: {
+          type: "array",
+          description:
+            "Filter conditions, combined with AND. Dates are 'YYYYMMDD' strings; LIKE uses % and _ wildcards.",
+          items: {
+            type: "object",
+            properties: {
+              field: { type: "string", minLength: 1, maxLength: 30 },
+              op: {
+                type: "string",
+                enum: [
+                  "EQ",
+                  "NE",
+                  "GT",
+                  "GE",
+                  "LT",
+                  "LE",
+                  "LIKE",
+                  "NOT_LIKE",
+                  "IN",
+                ],
+                default: "EQ",
+              },
+              value: {
+                type: ["string", "number"],
+                description: "Comparison value (all operators except IN)",
+              },
+              values: {
+                type: "array",
+                description: "Allowed values (IN only)",
+                items: { type: ["string", "number"] },
+                minItems: 1,
+                maxItems: 500,
+              },
+            },
+            required: ["field"],
+            additionalProperties: false,
+          },
+          maxItems: 50,
+        },
+        group_by: {
+          type: "array",
+          description:
+            "Fields to group by; returns one row per distinct combination. columns may only list group_by fields (default: all of them).",
+          items: { type: "string", minLength: 1, maxLength: 30 },
+          maxItems: 10,
+        },
+        count: {
+          type: "boolean",
+          description:
+            "Add COUNT(*) AS ROW_COUNT (per group with group_by, otherwise a single total). ROW_COUNT can be used in order_by.",
+        },
+        order_by: {
+          type: "array",
+          description:
+            "Sort order; use it so max_rows returns a deterministic top N.",
+          items: {
+            type: "object",
+            properties: {
+              field: { type: "string", minLength: 1, maxLength: 30 },
+              direction: {
+                type: "string",
+                enum: ["ASC", "DESC"],
+                default: "ASC",
+              },
+            },
+            required: ["field"],
+            additionalProperties: false,
+          },
+          maxItems: 10,
         },
       },
       required: ["table_name"],
