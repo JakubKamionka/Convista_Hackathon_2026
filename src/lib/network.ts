@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { readFileSync } from "node:fs";
 import { Agent } from "node:https";
 import { rootCertificates, createSecureContext } from "node:tls";
+import { HttpsProxyAgent } from "https-proxy-agent";
 import type { SapConfig } from "../config";
 
 const context = new AsyncLocalStorage<AbortSignal>();
@@ -16,7 +17,7 @@ export function requestSignal(): AbortSignal | undefined {
   return context.getStore();
 }
 
-export function createSapAgent(config: SapConfig): Agent {
+export function createSapAgent(config: SapConfig): Agent | HttpsProxyAgent {
   let ca: string[] | undefined;
   if (config.caFile) {
     let pem: string;
@@ -37,6 +38,16 @@ export function createSapAgent(config: SapConfig): Agent {
     console.error(
       "WARNING: TLS_REJECT_UNAUTHORIZED=0 disables SAP certificate verification. Use SAP_CA_FILE for private CAs.",
     );
+  if (config.proxy)
+    // The CONNECT tunnel is authenticated with the Connectivity token; TLS
+    // still terminates at SAP, so certificate checks apply end to end.
+    return new HttpsProxyAgent({
+      host: config.proxy.host,
+      port: config.proxy.port,
+      headers: { "Proxy-Authorization": config.proxy.authorization },
+      rejectUnauthorized,
+      ca,
+    });
   return new Agent({ rejectUnauthorized, ca });
 }
 

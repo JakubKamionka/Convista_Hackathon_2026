@@ -1,0 +1,17 @@
+applications:
+  - name: Convista_Hackathon
+    host: convista-hackathon
+    memory: 256M
+    instances: 1
+    buildpacks:
+      - nodejs_buildpack
+    command: node dist/http.js
+    env:
+      SAP_DESTINATION: SA1_300
+      SAP_CLIENT: "300"
+      SAP_LANGUAGE: EN
+      # Enables the write tools (CreateBusinessPartner, CreateObject, InsertTableRows).
+      SAP_ALLOW_WRITES: "1"
+    services:
+      - opole-Connectivity
+      - opole-destination

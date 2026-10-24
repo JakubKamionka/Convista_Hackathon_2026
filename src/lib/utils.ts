@@ -359,8 +359,22 @@ let axiosInstance: AxiosInstance | null = null;
 export function createAxiosInstance() {
   if (!axiosInstance) {
     config ??= getConfig();
+    // The BTP connectivity proxy answers CONNECT with 405 for http targets;
+    // it expects plain HTTP proxy requests (absolute URI) with the token in
+    // Proxy-Authorization. https targets still go through the CONNECT agent.
+    const agent = createSapAgent(config);
+    const httpProxy =
+      config.proxy && new URL(config.url).protocol === "http:"
+        ? config.proxy
+        : undefined;
     axiosInstance = axios.create({
-      httpsAgent: createSapAgent(config),
+      httpsAgent: agent,
+      proxy: httpProxy
+        ? { protocol: "http", host: httpProxy.host, port: httpProxy.port }
+        : false,
+      headers: httpProxy
+        ? { "Proxy-Authorization": httpProxy.authorization }
+        : undefined,
       timeout: 30_000,
       maxContentLength: MAX_RESPONSE_BYTES,
       maxBodyLength: MAX_RESPONSE_BYTES,
@@ -425,10 +439,33 @@ function mergeCookies(setCookie: string[] | undefined) {
   cookies = [...jar.values()].join("; ");
 }
 
-async function fetchCsrfToken(url: string): Promise<string> {
+// ADT write endpoints (activation, classrun, lock) reject GET without sending
+// a token, so ADT tokens are fetched from the discovery document instead.
+export function csrfFetchUrl(url: string): string {
+  const target = new URL(url);
+  return target.pathname.startsWith("/sap/bc/adt/")
+    ? `${target.origin}/sap/bc/adt/discovery`
+    : url;
+}
+
+// SAP signals a rejected token with "x-csrf-token: Required" on a 403; the
+// body is not always a string (OData returns JSON or XML).
+function isCsrfFailure(error: unknown): boolean {
+  if (!(error instanceof AxiosError) || error.response?.status !== 403)
+    return false;
+  const header = error.response.headers?.["x-csrf-token"];
+  const body = error.response.data;
+  return (
+    (typeof header === "string" && header.toLowerCase() === "required") ||
+    (typeof body === "string" && body.includes("CSRF"))
+  );
+}
+
+async function fetchCsrfToken(requestUrl: string): Promise<string> {
   if (!config) {
     config = getConfig();
   }
+  const url = csrfFetchUrl(requestUrl);
   assertSapTarget(url, config);
   try {
     const response = await createAxiosInstance()({
@@ -473,6 +510,7 @@ async function fetchCsrfToken(url: string): Promise<string> {
     // If we couldn't get token from error response either, throw the original error
     throw new Error(
       `Failed to fetch CSRF token: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
     );
   }
 }
@@ -491,14 +529,19 @@ export async function makeAdtRequest(
 
   assertSapTarget(url, config);
 
-  // Modifying requests (POST/PUT/DELETE) need a CSRF token
-  const needsCsrf = ["POST", "PUT", "DELETE"].includes(method);
+  // Modifying requests (POST/PUT/PATCH/DELETE) need a CSRF token
+  const needsCsrf = ["POST", "PUT", "PATCH", "DELETE"].includes(method);
   if (needsCsrf && !csrfToken) {
     try {
       csrfToken = await fetchCsrfToken(url);
     } catch (error) {
+      // Only the HTTP status is reported, never the upstream body.
+      const status =
+        error instanceof Error && error.cause instanceof AxiosError
+          ? error.cause.response?.status
+          : undefined;
       throw new Error(
-        "CSRF token is required for POST/PUT/DELETE requests but could not be fetched",
+        `CSRF token is required for POST/PUT/PATCH/DELETE requests but could not be fetched${status ? ` (HTTP ${status})` : ""}`,
       );
     }
   }
@@ -544,12 +587,7 @@ export async function makeAdtRequest(
     return response;
   } catch (error) {
     // If we get a 403 with "CSRF token validation failed", try to fetch a new token and retry
-    if (
-      error instanceof AxiosError &&
-      error.response?.status === 403 &&
-      typeof error.response.data === "string" &&
-      error.response.data.includes("CSRF")
-    ) {
+    if (isCsrfFailure(error)) {
       csrfToken = await fetchCsrfToken(url);
       requestConfig.headers["x-csrf-token"] = csrfToken;
       if (cookies) requestConfig.headers["Cookie"] = cookies;

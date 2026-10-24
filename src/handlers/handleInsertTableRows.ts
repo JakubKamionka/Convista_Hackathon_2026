@@ -5,9 +5,22 @@ import { writesEnabled } from './handleCreateBusinessPartner';
 import { adtErrorMessage, createObject, deleteObject } from './handleCreateObject';
 
 // Insert rows into a local customer table. ADT has no row-insert service, so this
-// generates a temporary $TMP class (IF_OO_ADT_CLASSRUN) that runs one
-// INSERT ... ACCEPTING DUPLICATE KEYS, runs it through ADT classrun and deletes it.
+// generates a temporary $TMP report that runs one INSERT ... ACCEPTING DUPLICATE KEYS,
+// runs it through ADT programrun and deletes it. (ADT classrun is not used: on some
+// systems it reports "Class does not implement if_oo_adt_classrun~main" for classes
+// that were created and activated through ADT REST.)
 // Insert only: existing rows are skipped, never updated.
+// UpdateTableRows and DeleteTableRows reuse the same helper with UPDATE / DELETE
+// statements; rows are always identified by their full key.
+
+export type RowOperation = 'insert' | 'update' | 'delete';
+
+// Helper report name prefix and the result counter each operation reports.
+const OPERATIONS: Record<RowOperation, { prefix: string; counter: string; unmatched: string }> = {
+    insert: { prefix: 'INS', counter: 'inserted', unmatched: 'skippedDuplicates' },
+    update: { prefix: 'UPD', counter: 'updated', unmatched: 'notFound' },
+    delete: { prefix: 'DEL', counter: 'deleted', unmatched: 'notFound' },
+};
 
 export const MAX_INSERT_ROWS = 1000;
 const MAX_VALUE_LENGTH = 10_000;
@@ -91,7 +104,7 @@ export function parseTableFields(source: string): TableField[] {
     return fields;
 }
 
-function checkRowsAgainstFields(rows: Record<string, unknown>[], fields: TableField[]) {
+function checkRowsAgainstFields(rows: Record<string, unknown>[], fields: TableField[], operation: RowOperation = 'insert') {
     const byName = new Map(fields.map((field) => [field.name, field]));
     const requiredKeys = fields.filter((field) => field.key && !field.client).map((field) => field.name);
     rows.forEach((row, index) => {
@@ -107,11 +120,17 @@ function checkRowsAgainstFields(rows: Record<string, unknown>[], fields: TableFi
             if (given.has(field.name)) {
                 throw new McpError(ErrorCode.InvalidParams, `rows[${index}]: field ${name} is given twice`);
             }
+            if (operation === 'delete' && !field.key) {
+                throw new McpError(ErrorCode.InvalidParams, `rows[${index}]: ${name} is not a key field; rows to delete are given by their key fields only`);
+            }
             given.set(field.name, value);
         }
         const missing = requiredKeys.filter((key) => given.get(key) == null);
         if (missing.length) {
             throw new McpError(ErrorCode.InvalidParams, `rows[${index}]: missing key field(s) ${missing.join(', ')}`);
+        }
+        if (operation === 'update' && given.size === requiredKeys.length) {
+            throw new McpError(ErrorCode.InvalidParams, `rows[${index}]: no non-key field to update`);
         }
     });
 }
@@ -126,43 +145,78 @@ export function abapLiteral(value: string): string {
     return chunks.join('\n        && ');
 }
 
-export function buildHelperClass(className: string, table: string, rows: Record<string, unknown>[]): string {
-    const cls = className.toLowerCase();
-    const tab = table.toLowerCase();
-    const appends = rows.map((row) => [
-        '        CLEAR row.',
+// Fills row from the given values; null leaves a field initial (for update: clears it).
+function fillRow(row: Record<string, unknown>): string[] {
+    return [
+        '      CLEAR row.',
         ...Object.entries(row)
             .filter(([, value]) => value !== null)
-            .map(([field, value]) => `        row-${field.toLowerCase()} = ${abapLiteral(String(value))}.`),
-        '        APPEND row TO rows.',
-    ].join('\n'));
+            .map(([field, value]) => `      row-${field.toLowerCase()} = ${abapLiteral(String(value))}.`),
+    ];
+}
+
+// One UPDATE per row: SET the given non-key fields, WHERE all key fields match.
+function updateStatement(tab: string, row: Record<string, unknown>, keys: string[]): string[] {
+    const fields = Object.keys(row).map((field) => field.toLowerCase());
+    const set = fields.filter((field) => !keys.includes(field));
     return [
-        `CLASS ${cls} DEFINITION PUBLIC FINAL CREATE PUBLIC.`,
-        '  PUBLIC SECTION.',
-        '    INTERFACES if_oo_adt_classrun.',
-        'ENDCLASS.',
+        ...fillRow(row),
+        `      UPDATE ${tab} SET`,
+        ...set.map((field, i) => `          ${field} = @row-${field}${i < set.length - 1 ? ',' : ''}`),
+        ...keys.map((key, i) => `        ${i === 0 ? 'WHERE' : '  AND'} ${key} = @row-${key}${i === keys.length - 1 ? '.' : ''}`),
+        '      changed = changed + sy-dbcnt.',
+    ];
+}
+
+export function buildHelperReport(
+    reportName: string,
+    table: string,
+    rows: Record<string, unknown>[],
+    operation: RowOperation = 'insert',
+    keys: string[] = [],
+): string {
+    const prog = reportName.toLowerCase();
+    const tab = table.toLowerCase();
+    const appends = () => rows.map((row) => [...fillRow(row), '      APPEND row TO rows.'].join('\n'));
+    const body = {
+        insert: () => [
+            ...appends(),
+            `      INSERT ${tab} FROM TABLE @rows ACCEPTING DUPLICATE KEYS.`,
+            '      changed = sy-dbcnt.',
+        ],
+        update: () => rows.map((row) => updateStatement(tab, row, keys).join('\n')),
+        delete: () => [
+            ...appends(),
+            `      DELETE ${tab} FROM TABLE @rows.`,
+            '      changed = sy-dbcnt.',
+        ],
+    }[operation]();
+    return [
+        // No page header and the widest list line, so the result line is never cut off.
+        `REPORT ${prog} NO STANDARD PAGE HEADING LINE-SIZE 255.`,
         '',
-        `CLASS ${cls} IMPLEMENTATION.`,
-        '  METHOD if_oo_adt_classrun~main.',
-        `    DATA rows TYPE STANDARD TABLE OF ${tab} WITH EMPTY KEY.`,
-        `    DATA row TYPE ${tab}.`,
-        '    TRY.',
-        ...appends,
-        `        INSERT ${tab} FROM TABLE @rows ACCEPTING DUPLICATE KEYS.`,
-        '        DATA(inserted) = sy-dbcnt.',
-        '        COMMIT WORK.',
-        "        out->write( |MCP_RESULT inserted={ inserted } total={ lines( rows ) }| ).",
-        '      CATCH cx_root INTO DATA(error).',
-        '        ROLLBACK WORK.',
-        "        out->write( |MCP_ERROR { error->get_text( ) }| ).",
-        '    ENDTRY.',
-        '  ENDMETHOD.',
-        'ENDCLASS.',
+        `DATA rows TYPE STANDARD TABLE OF ${tab} WITH EMPTY KEY.`,
+        `DATA row TYPE ${tab}.`,
+        'DATA changed TYPE i.',
+        '',
+        'START-OF-SELECTION.',
+        '  TRY.',
+        ...body,
+        '      COMMIT WORK.',
+        `      WRITE / |MCP_RESULT ${OPERATIONS[operation].counter}={ changed } total=${rows.length}|.`,
+        '    CATCH cx_root INTO DATA(error).',
+        '      ROLLBACK WORK.',
+        '      WRITE / |MCP_ERROR { error->get_text( ) }|.',
+        '  ENDTRY.',
         '',
     ].join('\n');
 }
 
-export async function handleInsertTableRows(args: any) {
+export function handleInsertTableRows(args: any) {
+    return changeTableRows('insert', args);
+}
+
+export async function changeTableRows(operation: RowOperation, args: any) {
     try {
         if (!writesEnabled()) {
             throw new McpError(ErrorCode.InvalidParams, 'Write tools are disabled; set SAP_ALLOW_WRITES=1 to enable them');
@@ -171,24 +225,27 @@ export async function handleInsertTableRows(args: any) {
         const baseUrl = await getBaseUrl();
         await assertLocalTable(baseUrl, table);
         const source = await makeAdtRequest(`${baseUrl}/sap/bc/adt/ddic/tables/${encodeURIComponent(table.toLowerCase())}/source/main`, 'GET', 30000);
-        checkRowsAgainstFields(rows, parseTableFields(String(source.data)));
+        const fields = parseTableFields(String(source.data));
+        checkRowsAgainstFields(rows, fields, operation);
+        const keys = fields.filter((field) => field.key && !field.client).map((field) => field.name);
 
-        const className = `ZCL_MCP_INS_${randomBytes(4).toString('hex').toUpperCase()}`;
+        const { prefix, counter, unmatched } = OPERATIONS[operation];
+        const reportName = `ZMCP_${prefix}_${randomBytes(4).toString('hex').toUpperCase()}`;
         const created = await createObject({
-            object_type: 'class',
-            name: className,
-            description: `Temporary MCP insert helper for ${table}`,
-            source: buildHelperClass(className, table, rows),
+            object_type: 'program',
+            name: reportName,
+            description: `Temporary MCP ${operation} helper for ${table}`,
+            source: buildHelperReport(reportName, table, rows, operation, keys),
         });
 
-        const result: Record<string, unknown> = { table, requested: rows.length, helperClass: className };
+        const result: Record<string, unknown> = { table, requested: rows.length, helperReport: reportName };
         try {
             if (created.activated !== true) {
-                result.error = created.error ?? 'the generated helper class did not activate';
+                result.error = created.error ?? 'the generated helper report did not activate';
                 result.messages = created.messages;
             } else {
                 const run = await makeAdtRequest(
-                    `${baseUrl}/sap/bc/adt/oo/classrun/${encodeURIComponent(className)}`,
+                    `${baseUrl}/sap/bc/adt/programs/programrun/${encodeURIComponent(reportName)}`,
                     'POST',
                     30000,
                     undefined,
@@ -196,12 +253,12 @@ export async function handleInsertTableRows(args: any) {
                     { Accept: 'text/plain' }
                 );
                 const output = String(run.data ?? '');
-                const ok = /MCP_RESULT inserted=(\d+) total=(\d+)/.exec(output);
+                const ok = new RegExp(`MCP_RESULT ${counter}=(\\d+) total=(\\d+)`).exec(output);
                 if (ok) {
-                    result.inserted = Number(ok[1]);
-                    result.skippedDuplicates = Number(ok[2]) - Number(ok[1]);
+                    result[counter] = Number(ok[1]);
+                    result[unmatched] = Number(ok[2]) - Number(ok[1]);
                 } else {
-                    result.error = /MCP_ERROR (.*)/.exec(output)?.[1]?.trim() || `unexpected classrun output: ${output.slice(0, 2000)}`;
+                    result.error = /MCP_ERROR (.*)/.exec(output)?.[1]?.trim() || `unexpected report output: ${output.slice(0, 2000)}`;
                 }
             }
         } catch (error) {
@@ -212,7 +269,7 @@ export async function handleInsertTableRows(args: any) {
                 result.helperDeleted = true;
             } catch (error) {
                 result.helperDeleted = false;
-                result.note = `Deleting the helper class failed (${adtErrorMessage(error)}); delete ${className} from $TMP manually.`;
+                result.note = `Deleting the helper report failed (${adtErrorMessage(error)}); delete ${reportName} from $TMP manually.`;
             }
         }
         return return_text_response(JSON.stringify(result, null, 2));

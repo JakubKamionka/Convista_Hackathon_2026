@@ -1,0 +1,9 @@
+node_modules
+.git
+.env
+.env.*
+*.pem
+coverage
+*.log
+convista-mcp-key
+xs-security.json

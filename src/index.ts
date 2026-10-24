@@ -34,9 +34,20 @@ import {
   CREATE_OBJECT_TYPES,
 } from "./handlers/handleCreateObject";
 import {
+  handleUpdateObject,
+  UPDATE_OBJECT_TYPES,
+} from "./handlers/handleUpdateObject";
+import {
+  handleDeleteObject,
+  DELETE_OBJECT_TYPES,
+} from "./handlers/handleDeleteObject";
+import {
   handleInsertTableRows,
   MAX_INSERT_ROWS,
 } from "./handlers/handleInsertTableRows";
+import { handleUpdateTableRows } from "./handlers/handleUpdateTableRows";
+import { handleDeleteTableRows } from "./handlers/handleDeleteTableRows";
+import { handleUpdateBusinessPartner } from "./handlers/handleUpdateBusinessPartner";
 
 // Import shared utility functions and types
 import { MAX_PAGE_LINES, cleanup } from "./lib/utils";
@@ -505,6 +516,29 @@ const WRITE_TOOL_DEFINITIONS = [
     },
   },
   {
+    name: "UpdateBusinessPartner",
+    write: true,
+    destructive: true,
+    description:
+      "Change properties of an existing business partner through the API_BUSINESS_PARTNER OData service (PATCH on A_BusinessPartner, ETag-checked). Requires SAP_ALLOW_WRITES=1 and an activated service. The service cannot delete business partners: to retire one, set IsMarkedForArchiving to true; to block it, set BusinessPartnerIsBlocked to true. Returns the changed property names.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        business_partner: {
+          type: "string",
+          description:
+            "Business partner number (numeric numbers are padded to 10 digits)",
+        },
+        fields: {
+          type: "object",
+          description:
+            'A_BusinessPartner properties to change, name to value (string or boolean), e.g. {"OrganizationBPName1": "Muster AG"} or {"IsMarkedForArchiving": true}. Navigation properties and the key cannot be changed.',
+        },
+      },
+      required: ["business_partner", "fields"],
+    },
+  },
+  {
     name: "CreateObject",
     write: true,
     description:
@@ -543,10 +577,73 @@ const WRITE_TOOL_DEFINITIONS = [
     },
   },
   {
+    name: "UpdateObject",
+    write: true,
+    destructive: true,
+    description:
+      "Overwrite the source of an existing ABAP repository object in a local $ package (no transport) through ADT: lock, write the full new source, unlock, then activate. Requires SAP_ALLOW_WRITES=1. Refuses objects outside local $ packages. Returns updated/activated plus activation messages; if activation fails, the new source stays saved as an inactive version and the result says so.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        object_type: {
+          type: "string",
+          enum: UPDATE_OBJECT_TYPES,
+          description:
+            "Kind of object. Only source-based objects can be updated; table and structure use DDIC source syntax (define table / define structure).",
+        },
+        name: {
+          type: "string",
+          description:
+            "Name of the existing object in customer namespace (Z* or Y*). For behavior_definition use the root CDS entity name.",
+        },
+        source: {
+          type: "string",
+          description:
+            "Complete new source code; replaces the current source entirely (must declare the same name).",
+          maxLength: 500_000,
+        },
+        function_group: {
+          type: "string",
+          description:
+            "Function group in a local $ package that contains the module (required for function_module)",
+        },
+      },
+      required: ["object_type", "name", "source"],
+    },
+  },
+  {
+    name: "DeleteObject",
+    write: true,
+    destructive: true,
+    description:
+      "Delete an ABAP repository object from a local $ package (no transport) through ADT: lock, then delete. Requires SAP_ALLOW_WRITES=1. Refuses objects outside local $ packages. Deleting a function group also deletes its function modules; a package must be empty. Cannot be undone.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        object_type: {
+          type: "string",
+          enum: DELETE_OBJECT_TYPES,
+          description: "Kind of object to delete",
+        },
+        name: {
+          type: "string",
+          description:
+            "Object name in customer namespace (Z* or Y*); for package a local name starting with $ (never $TMP itself). For behavior_definition use the root CDS entity name.",
+        },
+        function_group: {
+          type: "string",
+          description:
+            "Function group in a local $ package that contains the module (required for function_module)",
+        },
+      },
+      required: ["object_type", "name"],
+    },
+  },
+  {
     name: "InsertTableRows",
     write: true,
     description:
-      "Insert rows into a Z/Y transparent table in a local $ package. Generates a temporary $TMP class, runs it through ADT classrun (one INSERT ... ACCEPTING DUPLICATE KEYS plus COMMIT) and deletes it again. Insert only: rows whose key already exists are skipped, never updated. The client field is filled automatically; values follow ABAP conversion rules (e.g. dates as YYYYMMDD). Requires SAP_ALLOW_WRITES=1. Returns inserted and skippedDuplicates.",
+      "Insert rows into a Z/Y transparent table in a local $ package. Generates a temporary $TMP report, runs it through ADT programrun (one INSERT ... ACCEPTING DUPLICATE KEYS plus COMMIT) and deletes it again. Insert only: rows whose key already exists are skipped, never updated. The client field is filled automatically; values follow ABAP conversion rules (e.g. dates as YYYYMMDD). Requires SAP_ALLOW_WRITES=1. Returns inserted and skippedDuplicates.",
     inputSchema: {
       type: "object",
       properties: {
@@ -567,12 +664,69 @@ const WRITE_TOOL_DEFINITIONS = [
       required: ["table_name", "rows"],
     },
   },
+  {
+    name: "UpdateTableRows",
+    write: true,
+    destructive: true,
+    description:
+      "Update rows of a Z/Y transparent table in a local $ package by key. Generates a temporary $TMP report, runs it through ADT programrun (one UPDATE ... SET ... WHERE <full key> per row, then COMMIT; ROLLBACK on any error) and deletes it again. Only the given non-key fields change; null sets a field to its initial value. Rows whose key does not exist are counted as notFound, never inserted. The client field is filled automatically; values follow ABAP conversion rules (e.g. dates as YYYYMMDD). Requires SAP_ALLOW_WRITES=1. Returns updated and notFound.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        table_name: {
+          type: "string",
+          description:
+            "Table name in customer namespace (Z* or Y*, max. 16 characters)",
+        },
+        rows: {
+          type: "array",
+          minItems: 1,
+          maxItems: MAX_INSERT_ROWS,
+          description:
+            'Rows as objects of field name to value (string, number or null): all key fields except the client, plus at least one field to change, e.g. [{"book_id": "000001", "title": "Clean Code, 2nd ed."}].',
+          items: { type: "object" },
+        },
+      },
+      required: ["table_name", "rows"],
+    },
+  },
+  {
+    name: "DeleteTableRows",
+    write: true,
+    destructive: true,
+    description:
+      "Delete rows of a Z/Y transparent table in a local $ package by key. Generates a temporary $TMP report, runs it through ADT programrun (one DELETE ... FROM TABLE plus COMMIT) and deletes it again. Each row must give all key fields except the client and nothing else; there is no delete by condition. Rows whose key does not exist are counted as notFound. Requires SAP_ALLOW_WRITES=1. Cannot be undone. Returns deleted and notFound.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        table_name: {
+          type: "string",
+          description:
+            "Table name in customer namespace (Z* or Y*, max. 16 characters)",
+        },
+        rows: {
+          type: "array",
+          minItems: 1,
+          maxItems: MAX_INSERT_ROWS,
+          description:
+            'Keys of the rows to delete, e.g. [{"book_id": "000001"}]. All key fields except the client are required.',
+          items: { type: "object" },
+        },
+      },
+      required: ["table_name", "rows"],
+    },
+  },
 ];
 
 const HANDLERS: Record<string, (args: any) => Promise<any>> = {
   CreateBusinessPartner: handleCreateBusinessPartner,
   CreateObject: handleCreateObject,
+  UpdateObject: handleUpdateObject,
+  DeleteObject: handleDeleteObject,
   InsertTableRows: handleInsertTableRows,
+  UpdateTableRows: handleUpdateTableRows,
+  DeleteTableRows: handleDeleteTableRows,
+  UpdateBusinessPartner: handleUpdateBusinessPartner,
   GetProgram: handleGetProgram,
   GetClass: handleGetClass,
   GetFunction: handleGetFunction,
@@ -626,7 +780,7 @@ export function createServer(): McpServer {
         }),
         annotations: {
           readOnlyHint: !("write" in tool),
-          destructiveHint: false,
+          destructiveHint: "destructive" in tool,
           idempotentHint: !("write" in tool),
           openWorldHint: true,
         },

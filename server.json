@@ -52,6 +52,11 @@
           "name": "SAP_CA_FILE",
           "description": "Absolute path to a PEM CA bundle for the SAP server; augments Node bundled roots while retaining hostname verification",
           "isRequired": false
+        },
+        {
+          "name": "SAP_ALLOW_WRITES",
+          "description": "Set to 1 to register write tools (CreateBusinessPartner, UpdateBusinessPartner, CreateObject, UpdateObject, DeleteObject, InsertTableRows, UpdateTableRows, DeleteTableRows). Default: read-only.",
+          "isRequired": false
         }
       ]
     }

@@ -1,4 +1,6 @@
-import { handleInsertTableRows, buildHelperClass, parseTableFields, abapLiteral } from './handleInsertTableRows';
+import { handleInsertTableRows, buildHelperReport, parseTableFields, abapLiteral } from './handleInsertTableRows';
+import { handleUpdateTableRows } from './handleUpdateTableRows';
+import { handleDeleteTableRows } from './handleDeleteTableRows';
 import { makeAdtRequest, getBaseUrl } from '../lib/utils';
 
 jest.mock('../lib/utils', () => ({
@@ -58,10 +60,10 @@ describe('handleInsertTableRows', () => {
     expect(mockedRequest).not.toHaveBeenCalled();
   });
 
-  it('creates a helper class, runs it, reports counts and deletes the class', async () => {
+  it('creates a helper report, runs it, reports counts and deletes the report', async () => {
     mockUntilActivated();
     mockedRequest
-      .mockResolvedValueOnce({ data: 'MCP_RESULT inserted=1 total=2\n' }) // classrun
+      .mockResolvedValueOnce({ data: 'MCP_RESULT inserted=1 total=2\n' }) // programrun
       .mockResolvedValueOnce({ data: lockXml }) // lock for delete
       .mockResolvedValueOnce({ data: '' }); // delete
     const result = await handleInsertTableRows({
@@ -70,18 +72,18 @@ describe('handleInsertTableRows', () => {
     });
     expect(result.isError).toBe(false);
     const calls = mockedRequest.mock.calls;
-    const className = /adtcore:name="(ZCL_MCP_INS_[0-9A-F]{8})"/.exec(calls[2][3])![1];
+    const reportName = /adtcore:name="(ZMCP_INS_[0-9A-F]{8})"/.exec(calls[2][3])![1];
     expect(calls.map((c) => [c[0], c[1]])).toEqual([
       [`${base}/sap/bc/adt/ddic/tables/zmcp_books`, 'GET'],
       [`${base}/sap/bc/adt/ddic/tables/zmcp_books/source/main`, 'GET'],
-      [`${base}/sap/bc/adt/oo/classes`, 'POST'],
-      [`${base}/sap/bc/adt/oo/classes/${className.toLowerCase()}`, 'POST'],
-      [`${base}/sap/bc/adt/oo/classes/${className.toLowerCase()}/source/main`, 'PUT'],
-      [`${base}/sap/bc/adt/oo/classes/${className.toLowerCase()}`, 'POST'],
+      [`${base}/sap/bc/adt/programs/programs`, 'POST'],
+      [`${base}/sap/bc/adt/programs/programs/${reportName.toLowerCase()}`, 'POST'],
+      [`${base}/sap/bc/adt/programs/programs/${reportName.toLowerCase()}/source/main`, 'PUT'],
+      [`${base}/sap/bc/adt/programs/programs/${reportName.toLowerCase()}`, 'POST'],
       [`${base}/sap/bc/adt/activation`, 'POST'],
-      [`${base}/sap/bc/adt/oo/classrun/${className}`, 'POST'],
-      [`${base}/sap/bc/adt/oo/classes/${className.toLowerCase()}`, 'POST'],
-      [`${base}/sap/bc/adt/oo/classes/${className.toLowerCase()}`, 'DELETE'],
+      [`${base}/sap/bc/adt/programs/programrun/${reportName}`, 'POST'],
+      [`${base}/sap/bc/adt/programs/programs/${reportName.toLowerCase()}`, 'POST'],
+      [`${base}/sap/bc/adt/programs/programs/${reportName.toLowerCase()}`, 'DELETE'],
     ]);
     expect(calls[2][3]).toContain('<adtcore:packageRef adtcore:name="$TMP"/>');
     expect(calls[4][3]).toContain('INSERT zmcp_books FROM TABLE @rows ACCEPTING DUPLICATE KEYS.');
@@ -90,11 +92,11 @@ describe('handleInsertTableRows', () => {
     expect(calls[4][3]).not.toContain('row-title = `null`');
     expect(calls[9][4]).toEqual({ lockHandle: 'H123' });
     expect(JSON.parse(result.content[0].text)).toMatchObject({
-      table: 'ZMCP_BOOKS', requested: 2, inserted: 1, skippedDuplicates: 1, helperClass: className, helperDeleted: true,
+      table: 'ZMCP_BOOKS', requested: 2, inserted: 1, skippedDuplicates: 1, helperReport: reportName, helperDeleted: true,
     });
   });
 
-  it('reports the ABAP error from the run and still deletes the helper class', async () => {
+  it('reports the ABAP error from the run and still deletes the helper report', async () => {
     mockUntilActivated();
     mockedRequest
       .mockResolvedValueOnce({ data: 'MCP_ERROR Unable to interpret "abc" as a number.\n' })
@@ -120,14 +122,14 @@ describe('handleInsertTableRows', () => {
       .mockResolvedValueOnce({ data: '' });
     const result = await handleInsertTableRows({ table_name: 'ZMCP_BOOKS', rows: [{ book_id: '1' }] });
     const calls = mockedRequest.mock.calls;
-    expect(calls.some((c) => String(c[0]).includes('/classrun/'))).toBe(false);
+    expect(calls.some((c) => String(c[0]).includes('/programrun/'))).toBe(false);
     expect(calls[8][1]).toBe('DELETE');
     expect(JSON.parse(result.content[0].text)).toMatchObject({
-      error: 'the generated helper class did not activate', messages: [{ type: 'E', line: '9', text: 'Type error' }], helperDeleted: true,
+      error: 'the generated helper report did not activate', messages: [{ type: 'E', line: '9', text: 'Type error' }], helperDeleted: true,
     });
   });
 
-  it('unlocks and reports when deleting the helper class fails', async () => {
+  it('unlocks and reports when deleting the helper report fails', async () => {
     mockUntilActivated();
     mockedRequest
       .mockResolvedValueOnce({ data: 'MCP_RESULT inserted=1 total=1' })
@@ -178,7 +180,7 @@ describe('handleInsertTableRows', () => {
   });
 });
 
-describe('helper class generation', () => {
+describe('helper report generation', () => {
   it('reads key, client and normal fields from DDL source', () => {
     expect(parseTableFields(tableSource)).toEqual([
       { name: 'client', key: true, client: true },
@@ -200,8 +202,81 @@ describe('helper class generation', () => {
   });
 
   it('keeps every generated line under the ABAP line limit', () => {
-    const source = buildHelperClass('ZCL_MCP_INS_00000000', 'ZMCP_BOOKS', [{ title: '`'.repeat(500) }]);
+    const source = buildHelperReport('ZMCP_INS_00000000', 'ZMCP_BOOKS', [{ title: '`'.repeat(500) }]);
     expect(Math.max(...source.split('\n').map((line) => line.length))).toBeLessThan(255);
-    expect(source).toContain('INTERFACES if_oo_adt_classrun.');
+    expect(source).toContain('REPORT zmcp_ins_00000000 NO STANDARD PAGE HEADING LINE-SIZE 255.');
+  });
+});
+
+describe('update and delete', () => {
+  const originalFlag = process.env.SAP_ALLOW_WRITES;
+
+  beforeEach(() => {
+    mockedRequest.mockReset();
+    (getBaseUrl as jest.Mock).mockReset().mockResolvedValue(base);
+    process.env.SAP_ALLOW_WRITES = '1';
+  });
+
+  afterAll(() => {
+    if (originalFlag === undefined) delete process.env.SAP_ALLOW_WRITES;
+    else process.env.SAP_ALLOW_WRITES = originalFlag;
+  });
+
+  it('updates by key with a ZMCP_UPD helper and reports notFound', async () => {
+    mockUntilActivated();
+    mockedRequest
+      .mockResolvedValueOnce({ data: 'MCP_RESULT updated=1 total=2\n' })
+      .mockResolvedValueOnce({ data: lockXml })
+      .mockResolvedValueOnce({ data: '' });
+    const result = await handleUpdateTableRows({
+      table_name: 'ZMCP_BOOKS',
+      rows: [{ book_id: '000001', title: 'New', price: null }, { book_id: '000009', currency: 'USD' }],
+    });
+    const source = mockedRequest.mock.calls[4][3];
+    expect(mockedRequest.mock.calls[2][3]).toMatch(/adtcore:name="ZMCP_UPD_[0-9A-F]{8}"/);
+    expect(source).toContain('      UPDATE zmcp_books SET\n          title = @row-title,\n          price = @row-price\n        WHERE book_id = @row-book_id.');
+    expect(source).toContain('          currency = @row-currency\n        WHERE book_id = @row-book_id.');
+    expect(source).not.toContain('row-price = ');
+    expect(source).not.toContain('INSERT');
+    expect(JSON.parse(result.content[0].text)).toMatchObject({ table: 'ZMCP_BOOKS', requested: 2, updated: 1, notFound: 1, helperDeleted: true });
+  });
+
+  it('deletes by key with a ZMCP_DEL helper', async () => {
+    mockUntilActivated();
+    mockedRequest
+      .mockResolvedValueOnce({ data: 'MCP_RESULT deleted=1 total=1\n' })
+      .mockResolvedValueOnce({ data: lockXml })
+      .mockResolvedValueOnce({ data: '' });
+    const result = await handleDeleteTableRows({ table_name: 'ZMCP_BOOKS', rows: [{ book_id: '000001' }] });
+    const source = mockedRequest.mock.calls[4][3];
+    expect(mockedRequest.mock.calls[2][3]).toMatch(/adtcore:name="ZMCP_DEL_[0-9A-F]{8}"/);
+    expect(source).toContain('DELETE zmcp_books FROM TABLE @rows.');
+    expect(JSON.parse(result.content[0].text)).toMatchObject({ deleted: 1, notFound: 0, helperDeleted: true });
+  });
+
+  it('builds a multi-key WHERE clause', () => {
+    const source = buildHelperReport('ZMCP_UPD_00000000', 'ZT', [{ a: '1', b: '2', c: 'x' }], 'update', ['a', 'b']);
+    expect(source).toContain('        WHERE a = @row-a\n          AND b = @row-b.');
+    expect(source).toContain('MCP_RESULT updated={ changed } total=1');
+  });
+
+  it.each([
+    [handleUpdateTableRows, [{ book_id: '1' }], 'no non-key field'],
+    [handleUpdateTableRows, [{ title: 'x' }], 'missing key field(s) book_id'],
+    [handleDeleteTableRows, [{ book_id: '1', title: 'x' }], 'title is not a key field'],
+    [handleDeleteTableRows, [{ book_id: null }], 'missing key field(s) book_id'],
+  ])('checks rows before creating anything (%#)', async (handler, rows, text) => {
+    mockedRequest.mockResolvedValueOnce({ data: tableXml('$TMP') }).mockResolvedValueOnce({ data: tableSource });
+    const result = await (handler as any)({ table_name: 'ZMCP_BOOKS', rows });
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result)).toContain(text);
+    expect(mockedRequest).toHaveBeenCalledTimes(2);
+  });
+
+  it('refuses to run unless SAP_ALLOW_WRITES=1', async () => {
+    delete process.env.SAP_ALLOW_WRITES;
+    const result = await handleDeleteTableRows({ table_name: 'ZMCP_BOOKS', rows: [{ book_id: '1' }] });
+    expect(result.isError).toBe(true);
+    expect(mockedRequest).not.toHaveBeenCalled();
   });
 });

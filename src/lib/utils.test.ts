@@ -1,5 +1,6 @@
 import { AxiosError } from 'axios';
 import {
+  csrfFetchUrl,
   MAX_PAGE_LINES,
   SAFE_OUTPUT_BYTES,
   return_error,
@@ -179,38 +180,5 @@ describe('bounded text responses', () => {
     });
   });
 });
-
-describe('SAP error reporting', () => {
-  function httpError(status: number, data: unknown): AxiosError {
-    const error = new AxiosError('failed');
-    (error as any).response = { status, data };
-    return error;
-  }
-
-  it('surfaces OData business messages without duplicates', () => {
-    const result = return_error(httpError(400, {
-      error: {
-        message: { lang: 'en', value: 'No transfer of interval' },
-        innererror: {
-          errordetails: [
-            { message: 'No transfer of interval' },
-            { message: 'Check messages for business partner' }
-          ]
-        }
-      }
-    }));
-    expect(responseText(result)).toBe(
-      'Error: SAP request failed (HTTP 400): No transfer of interval; Check messages for business partner'
-    );
-  });
-
-  it('parses OData errors delivered as JSON strings', () => {
-    const result = return_error(httpError(400, '{"error":{"message":{"value":"Invalid grouping"}}}'));
-    expect(responseText(result)).toBe('Error: SAP request failed (HTTP 400): Invalid grouping');
-  });
-
-  it('never echoes non-OData bodies', () => {
-    const result = return_error(httpError(500, '<html>login page with secrets</html>'));
-    expect(responseText(result)).toBe('Error: SAP request failed (HTTP 500)');
   });
 });

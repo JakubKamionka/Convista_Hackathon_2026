@@ -10,7 +10,7 @@ import { writesEnabled } from './handleCreateBusinessPartner';
 const PACKAGE = '$TMP';
 const ADTCORE = 'http://www.sap.com/adt/core';
 
-interface ObjectKind {
+export interface ObjectKind {
     adtType: string;
     // XML root element and its namespace declaration
     root: string;
@@ -77,6 +77,7 @@ const KINDS: Record<string, ObjectKind> = {
 };
 
 export const CREATE_OBJECT_TYPES = Object.keys(KINDS);
+export const SOURCE_OBJECT_TYPES = CREATE_OBJECT_TYPES.filter((type) => KINDS[type].hasSource);
 
 // ADT errors are exc:exception XML; only its localizedMessage is passed on,
 // never the raw body.
@@ -122,13 +123,15 @@ function buildCreateBody(kind: ObjectKind, args: any, name: string): string {
     return `<?xml version="1.0" encoding="UTF-8"?><${kind.root} ${attributes}>${children}</${kind.root}>`;
 }
 
-function validate(args: any): { kind: ObjectKind; name: string } {
-    const kind = KINDS[args?.object_type];
+// Shared by create, update and delete: checks object_type, name and
+// function_group and returns the object's ADT URI.
+export function resolveObject(args: any, types: string[] = CREATE_OBJECT_TYPES): { kind: ObjectKind; name: string; objectUri: string } {
+    const kind = types.includes(args?.object_type) ? KINDS[args.object_type] : undefined;
     if (!kind) {
-        throw new McpError(ErrorCode.InvalidParams, `object_type must be one of: ${CREATE_OBJECT_TYPES.join(', ')}`);
+        throw new McpError(ErrorCode.InvalidParams, `object_type must be one of: ${types.join(', ')}`);
     }
-    if (!args.name || !args.description) {
-        throw new McpError(ErrorCode.InvalidParams, 'name and description are required');
+    if (!args.name) {
+        throw new McpError(ErrorCode.InvalidParams, 'name is required');
     }
     const name = String(args.name).toUpperCase();
     // Customer namespace only; local packages must start with $ so they stay non-transportable.
@@ -147,23 +150,37 @@ function validate(args: any): { kind: ObjectKind; name: string } {
     if (kind.adtType === 'FUGR/FF' && !/^[ZY][A-Z0-9_]{0,25}$/i.test(String(args.function_group ?? ''))) {
         throw new McpError(ErrorCode.InvalidParams, 'function_group (Z/Y name of an existing $TMP function group) is required for function_module');
     }
-    if (args.source !== undefined && !kind.hasSource) {
+    const objectUri = `${kind.collection(args)}/${encodeURIComponent(name.toLowerCase())}`;
+    return { kind, name, objectUri };
+}
+
+function validate(args: any) {
+    const resolved = resolveObject(args);
+    if (!args.description) {
+        throw new McpError(ErrorCode.InvalidParams, 'name and description are required');
+    }
+    if (args.source !== undefined && !resolved.kind.hasSource) {
         throw new McpError(ErrorCode.InvalidParams, `source is not supported for object_type ${args.object_type}`);
     }
-    return { kind, name };
+    return resolved;
+}
+
+// Writes are limited to local $ packages so nothing ever needs a transport.
+export async function assertLocalObject(baseUrl: string, objectUri: string, label: string) {
+    const response = await makeAdtRequest(`${baseUrl}${objectUri}`, 'GET', 30000);
+    const pkg = /<adtcore:packageRef[^>]*adtcore:name="([^"]*)"/.exec(String(response.data))?.[1];
+    if (!pkg?.startsWith('$')) {
+        throw new McpError(ErrorCode.InvalidParams, `${label} is in package ${pkg ?? 'unknown'}, not a local $ package`);
+    }
 }
 
 // A function module is transported with its group, so the group must be local.
-async function assertLocalFunctionGroup(baseUrl: string, group: string) {
-    const response = await makeAdtRequest(
-        `${baseUrl}/sap/bc/adt/functions/groups/${encodeURIComponent(group.toLowerCase())}`,
-        'GET',
-        30000
+export async function assertLocalFunctionGroup(baseUrl: string, group: string) {
+    await assertLocalObject(
+        baseUrl,
+        `/sap/bc/adt/functions/groups/${encodeURIComponent(group.toLowerCase())}`,
+        `function group ${group.toUpperCase()}`
     );
-    const pkg = /<adtcore:packageRef[^>]*adtcore:name="([^"]*)"/.exec(String(response.data))?.[1];
-    if (!pkg?.startsWith('$')) {
-        throw new McpError(ErrorCode.InvalidParams, `function group ${group.toUpperCase()} is in package ${pkg ?? 'unknown'}, not a local $ package`);
-    }
 }
 
 // Locks need a stateful ADT session; the session cookie is kept by makeAdtRequest.
@@ -196,7 +213,7 @@ async function unlockObject(baseUrl: string, objectUri: string, lockHandle: stri
     );
 }
 
-async function writeSource(baseUrl: string, objectUri: string, source: string) {
+export async function writeSource(baseUrl: string, objectUri: string, source: string) {
     const lockHandle = await lockObject(baseUrl, objectUri);
     try {
         await makeAdtRequest(
@@ -223,7 +240,7 @@ export async function deleteObject(baseUrl: string, objectUri: string) {
     }
 }
 
-async function activate(baseUrl: string, objectUri: string, name: string) {
+export async function activate(baseUrl: string, objectUri: string, name: string) {
     const body = `<?xml version="1.0" encoding="UTF-8"?><adtcore:objectReferences xmlns:adtcore="${ADTCORE}">`
         + `<adtcore:objectReference adtcore:uri="${escapeXml(objectUri)}" adtcore:name="${escapeXml(name)}"/></adtcore:objectReferences>`;
     const response = await makeAdtRequest(
@@ -247,13 +264,12 @@ async function activate(baseUrl: string, objectUri: string, name: string) {
 // Creates the object and reports partial progress. Throws only when nothing was
 // created (invalid input or a failed create POST). Callers check SAP_ALLOW_WRITES.
 export async function createObject(args: any): Promise<Record<string, unknown>> {
-    const { kind, name } = validate(args);
+    const { kind, name, objectUri } = validate(args);
     const baseUrl = await getBaseUrl();
     if (kind.adtType === 'FUGR/FF') {
         await assertLocalFunctionGroup(baseUrl, args.function_group);
     }
     const collection = kind.collection(args);
-    const objectUri = `${collection}/${encodeURIComponent(name.toLowerCase())}`;
 
     await makeAdtRequest(
         `${baseUrl}${collection}`,
