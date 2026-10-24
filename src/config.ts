@@ -1,3 +1,9 @@
+export interface SapProxy {
+  host: string;
+  port: number;
+  authorization: string;
+}
+
 export interface SapConfig {
   url: string;
   username: string;
@@ -6,6 +12,14 @@ export interface SapConfig {
   caFile?: string;
   language?: string;
   rejectUnauthorized?: boolean;
+  proxy?: SapProxy;
+}
+
+// Set on Cloud Foundry when the SAP destination is OnPremise and must be
+// reached through the Connectivity service's Cloud Connector tunnel.
+let connectivityProxy: SapProxy | undefined;
+export function setConnectivityProxy(proxy: SapProxy | undefined): void {
+  connectivityProxy = proxy;
 }
 
 export function getConfig(): SapConfig {
@@ -52,5 +66,6 @@ export function getConfig(): SapConfig {
     client,
     caFile: process.env.SAP_CA_FILE || undefined,
     rejectUnauthorized: tls !== "0",
+    proxy: connectivityProxy,
   };
 }
