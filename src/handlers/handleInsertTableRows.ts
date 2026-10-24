@@ -5,8 +5,10 @@ import { writesEnabled } from './handleCreateBusinessPartner';
 import { adtErrorMessage, createObject, deleteObject } from './handleCreateObject';
 
 // Insert rows into a local customer table. ADT has no row-insert service, so this
-// generates a temporary $TMP class (IF_OO_ADT_CLASSRUN) that runs one
-// INSERT ... ACCEPTING DUPLICATE KEYS, runs it through ADT classrun and deletes it.
+// generates a temporary $TMP report that runs one INSERT ... ACCEPTING DUPLICATE KEYS,
+// runs it through ADT programrun and deletes it. (ADT classrun is not used: on some
+// systems it reports "Class does not implement if_oo_adt_classrun~main" for classes
+// that were created and activated through ADT REST.)
 // Insert only: existing rows are skipped, never updated.
 
 export const MAX_INSERT_ROWS = 1000;
@@ -126,38 +128,34 @@ export function abapLiteral(value: string): string {
     return chunks.join('\n        && ');
 }
 
-export function buildHelperClass(className: string, table: string, rows: Record<string, unknown>[]): string {
-    const cls = className.toLowerCase();
+export function buildHelperReport(reportName: string, table: string, rows: Record<string, unknown>[]): string {
+    const prog = reportName.toLowerCase();
     const tab = table.toLowerCase();
     const appends = rows.map((row) => [
-        '        CLEAR row.',
+        '      CLEAR row.',
         ...Object.entries(row)
             .filter(([, value]) => value !== null)
-            .map(([field, value]) => `        row-${field.toLowerCase()} = ${abapLiteral(String(value))}.`),
-        '        APPEND row TO rows.',
+            .map(([field, value]) => `      row-${field.toLowerCase()} = ${abapLiteral(String(value))}.`),
+        '      APPEND row TO rows.',
     ].join('\n'));
     return [
-        `CLASS ${cls} DEFINITION PUBLIC FINAL CREATE PUBLIC.`,
-        '  PUBLIC SECTION.',
-        '    INTERFACES if_oo_adt_classrun.',
-        'ENDCLASS.',
+        // No page header and the widest list line, so the result line is never cut off.
+        `REPORT ${prog} NO STANDARD PAGE HEADING LINE-SIZE 255.`,
         '',
-        `CLASS ${cls} IMPLEMENTATION.`,
-        '  METHOD if_oo_adt_classrun~main.',
-        `    DATA rows TYPE STANDARD TABLE OF ${tab} WITH EMPTY KEY.`,
-        `    DATA row TYPE ${tab}.`,
-        '    TRY.',
+        `DATA rows TYPE STANDARD TABLE OF ${tab} WITH EMPTY KEY.`,
+        `DATA row TYPE ${tab}.`,
+        '',
+        'START-OF-SELECTION.',
+        '  TRY.',
         ...appends,
-        `        INSERT ${tab} FROM TABLE @rows ACCEPTING DUPLICATE KEYS.`,
-        '        DATA(inserted) = sy-dbcnt.',
-        '        COMMIT WORK.',
-        "        out->write( |MCP_RESULT inserted={ inserted } total={ lines( rows ) }| ).",
-        '      CATCH cx_root INTO DATA(error).',
-        '        ROLLBACK WORK.',
-        "        out->write( |MCP_ERROR { error->get_text( ) }| ).",
-        '    ENDTRY.',
-        '  ENDMETHOD.',
-        'ENDCLASS.',
+        `      INSERT ${tab} FROM TABLE @rows ACCEPTING DUPLICATE KEYS.`,
+        '      DATA(inserted) = sy-dbcnt.',
+        '      COMMIT WORK.',
+        '      WRITE / |MCP_RESULT inserted={ inserted } total={ lines( rows ) }|.',
+        '    CATCH cx_root INTO DATA(error).',
+        '      ROLLBACK WORK.',
+        '      WRITE / |MCP_ERROR { error->get_text( ) }|.',
+        '  ENDTRY.',
         '',
     ].join('\n');
 }
@@ -173,22 +171,22 @@ export async function handleInsertTableRows(args: any) {
         const source = await makeAdtRequest(`${baseUrl}/sap/bc/adt/ddic/tables/${encodeURIComponent(table.toLowerCase())}/source/main`, 'GET', 30000);
         checkRowsAgainstFields(rows, parseTableFields(String(source.data)));
 
-        const className = `ZCL_MCP_INS_${randomBytes(4).toString('hex').toUpperCase()}`;
+        const reportName = `ZMCP_INS_${randomBytes(4).toString('hex').toUpperCase()}`;
         const created = await createObject({
-            object_type: 'class',
-            name: className,
+            object_type: 'program',
+            name: reportName,
             description: `Temporary MCP insert helper for ${table}`,
-            source: buildHelperClass(className, table, rows),
+            source: buildHelperReport(reportName, table, rows),
         });
 
-        const result: Record<string, unknown> = { table, requested: rows.length, helperClass: className };
+        const result: Record<string, unknown> = { table, requested: rows.length, helperReport: reportName };
         try {
             if (created.activated !== true) {
-                result.error = created.error ?? 'the generated helper class did not activate';
+                result.error = created.error ?? 'the generated helper report did not activate';
                 result.messages = created.messages;
             } else {
                 const run = await makeAdtRequest(
-                    `${baseUrl}/sap/bc/adt/oo/classrun/${encodeURIComponent(className)}`,
+                    `${baseUrl}/sap/bc/adt/programs/programrun/${encodeURIComponent(reportName)}`,
                     'POST',
                     30000,
                     undefined,
@@ -201,7 +199,7 @@ export async function handleInsertTableRows(args: any) {
                     result.inserted = Number(ok[1]);
                     result.skippedDuplicates = Number(ok[2]) - Number(ok[1]);
                 } else {
-                    result.error = /MCP_ERROR (.*)/.exec(output)?.[1]?.trim() || `unexpected classrun output: ${output.slice(0, 2000)}`;
+                    result.error = /MCP_ERROR (.*)/.exec(output)?.[1]?.trim() || `unexpected report output: ${output.slice(0, 2000)}`;
                 }
             }
         } catch (error) {
@@ -212,7 +210,7 @@ export async function handleInsertTableRows(args: any) {
                 result.helperDeleted = true;
             } catch (error) {
                 result.helperDeleted = false;
-                result.note = `Deleting the helper class failed (${adtErrorMessage(error)}); delete ${className} from $TMP manually.`;
+                result.note = `Deleting the helper report failed (${adtErrorMessage(error)}); delete ${reportName} from $TMP manually.`;
             }
         }
         return return_text_response(JSON.stringify(result, null, 2));

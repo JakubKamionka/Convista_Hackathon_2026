@@ -467,7 +467,7 @@ const WRITE_TOOL_DEFINITIONS = [
     name: "InsertTableRows",
     write: true,
     description:
-      "Insert rows into a Z/Y transparent table in a local $ package. Generates a temporary $TMP class, runs it through ADT classrun (one INSERT ... ACCEPTING DUPLICATE KEYS plus COMMIT) and deletes it again. Insert only: rows whose key already exists are skipped, never updated. The client field is filled automatically; values follow ABAP conversion rules (e.g. dates as YYYYMMDD). Requires SAP_ALLOW_WRITES=1. Returns inserted and skippedDuplicates.",
+      "Insert rows into a Z/Y transparent table in a local $ package. Generates a temporary $TMP report, runs it through ADT programrun (one INSERT ... ACCEPTING DUPLICATE KEYS plus COMMIT) and deletes it again. Insert only: rows whose key already exists are skipped, never updated. The client field is filled automatically; values follow ABAP conversion rules (e.g. dates as YYYYMMDD). Requires SAP_ALLOW_WRITES=1. Returns inserted and skippedDuplicates.",
     inputSchema: {
       type: "object",
       properties: {
